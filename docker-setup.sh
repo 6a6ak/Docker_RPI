@@ -2,89 +2,173 @@
 
 set -e
 
+APP_NAME="Docker Raspberry Pi Manager"
 USER_NAME="$(whoami)"
 
-echo "[1] Detect OS..."
-
-if [ -f /etc/os-release ]; then
-    . /etc/os-release
-else
-    echo "Cannot detect OS."
-    exit 1
-fi
-
-ARCH="$(dpkg --print-architecture)"
-CODENAME="${VERSION_CODENAME}"
-
-if [ "$ARCH" != "arm64" ]; then
-    echo "This script is recommended for 64-bit Raspberry Pi OS or Ubuntu ARM64."
-    echo "Detected architecture: $ARCH"
-    exit 1
-fi
-
-case "$ID" in
-    ubuntu)
-        DOCKER_REPO_URL="https://download.docker.com/linux/ubuntu"
-        ;;
-    debian|raspbian)
-        DOCKER_REPO_URL="https://download.docker.com/linux/debian"
-        ;;
-    *)
-        echo "Unsupported OS: $ID"
-        echo "Supported: Ubuntu, Debian, Raspberry Pi OS"
+detect_raspberry_pi() {
+    if ! grep -qi "raspberry pi" /proc/device-tree/model 2>/dev/null; then
+        echo "This installer is only for Raspberry Pi."
         exit 1
-        ;;
-esac
+    fi
+}
 
-echo "OS: $PRETTY_NAME"
-echo "Codename: $CODENAME"
-echo "Architecture: $ARCH"
-echo "Docker repo: $DOCKER_REPO_URL"
+detect_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+    else
+        echo "Cannot detect OS."
+        exit 1
+    fi
 
-echo "[2] Remove old Docker repo files..."
-sudo rm -f /etc/apt/sources.list.d/docker.list
-sudo rm -f /etc/apt/sources.list.d/docker.*
+    ARCH="$(dpkg --print-architecture)"
+    CODENAME="${VERSION_CODENAME}"
 
-echo "[3] Install prerequisites..."
-sudo apt update
-sudo apt install -y ca-certificates curl gnupg
+    case "$ARCH" in
+        arm64|armhf)
+            ;;
+        *)
+            echo "Unsupported architecture: $ARCH"
+            echo "Supported Raspberry Pi architectures: arm64, armhf"
+            exit 1
+            ;;
+    esac
 
-echo "[4] Add Docker GPG key..."
-sudo install -m 0755 -d /etc/apt/keyrings
+    case "$ID" in
+        ubuntu)
+            DOCKER_REPO_URL="https://download.docker.com/linux/ubuntu"
+            ;;
+        debian|raspbian)
+            DOCKER_REPO_URL="https://download.docker.com/linux/debian"
+            ;;
+        *)
+            echo "Unsupported OS: $ID"
+            echo "Supported: Raspberry Pi OS, Debian, Ubuntu"
+            exit 1
+            ;;
+    esac
+}
 
-curl -fsSL "$DOCKER_REPO_URL/gpg" | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+install_docker() {
+    detect_raspberry_pi
+    detect_os
 
-sudo chmod a+r /etc/apt/keyrings/docker.gpg
+    echo "Installing Docker on Raspberry Pi..."
+    echo "OS: $PRETTY_NAME"
+    echo "Codename: $CODENAME"
+    echo "Architecture: $ARCH"
 
-echo "[5] Add Docker repository..."
-echo "deb [arch=$ARCH signed-by=/etc/apt/keyrings/docker.gpg] $DOCKER_REPO_URL $CODENAME stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+    sudo rm -f /etc/apt/sources.list.d/docker.list
+    sudo rm -f /etc/apt/sources.list.d/docker.*
 
-echo "[6] Install Docker..."
-sudo apt update
-sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    sudo apt update
+    sudo apt install -y ca-certificates curl gnupg
 
-echo "[7] Enable and start Docker..."
-sudo systemctl enable docker
-sudo systemctl start docker
+    sudo install -m 0755 -d /etc/apt/keyrings
 
-echo "[8] Add current user to docker group..."
-sudo groupadd docker 2>/dev/null || true
-sudo usermod -aG docker "$USER_NAME"
+    curl -fsSL "$DOCKER_REPO_URL/gpg" | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 
-echo "[9] Fix Docker socket permission..."
-sudo chown root:docker /var/run/docker.sock
-sudo chmod 660 /var/run/docker.sock
+    sudo chmod a+r /etc/apt/keyrings/docker.gpg
 
-echo
-echo "=== Test with sudo ==="
-sudo docker run hello-world || true
+    echo "deb [arch=$ARCH signed-by=/etc/apt/keyrings/docker.gpg] $DOCKER_REPO_URL $CODENAME stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-echo
-echo "=== Test without sudo ==="
-newgrp docker <<EONG
-docker run hello-world || echo "Logout/login may be required."
-EONG
+    sudo apt update
+    sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-echo
-echo "Docker installation completed."
-echo "If permission is denied, logout and login again."
+    sudo systemctl enable docker
+    sudo systemctl start docker
+
+    sudo groupadd docker 2>/dev/null || true
+    sudo usermod -aG docker "$USER_NAME"
+
+    sudo chown root:docker /var/run/docker.sock
+    sudo chmod 660 /var/run/docker.sock
+
+    echo
+    echo "Docker installed successfully."
+    echo "Run this command if Docker needs permission refresh:"
+    echo "newgrp docker"
+}
+
+status_docker() {
+    echo "Docker service status:"
+    sudo systemctl status docker --no-pager || true
+
+    echo
+    echo "Docker version:"
+    docker version || true
+
+    echo
+    echo "Docker Compose version:"
+    docker compose version || true
+
+    echo
+    echo "Docker containers:"
+    docker ps -a || true
+}
+
+uninstall_docker() {
+    echo "Stopping Docker..."
+    sudo systemctl stop docker 2>/dev/null || true
+    sudo systemctl disable docker 2>/dev/null || true
+
+    echo "Removing Docker packages..."
+    sudo apt remove -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || true
+
+    echo "Removing Docker repository..."
+    sudo rm -f /etc/apt/sources.list.d/docker.list
+    sudo rm -f /etc/apt/sources.list.d/docker.*
+    sudo rm -f /etc/apt/keyrings/docker.gpg
+
+    echo "Removing Docker data..."
+    read -r -p "Remove all Docker images, containers and volumes? [y/N]: " CONFIRM
+
+    if [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]]; then
+        sudo rm -rf /var/lib/docker
+        sudo rm -rf /var/lib/containerd
+        echo "Docker data removed."
+    else
+        echo "Docker data kept."
+    fi
+
+    sudo apt update
+
+    echo
+    echo "Docker uninstalled."
+}
+
+show_menu() {
+    echo "=============================="
+    echo "$APP_NAME"
+    echo "=============================="
+    echo "1) Install Docker"
+    echo "2) Docker Status"
+    echo "3) Uninstall Docker"
+    echo "4) Exit"
+    echo "=============================="
+}
+
+while true; do
+    show_menu
+    read -r -p "Choose an option: " CHOICE
+
+    case "$CHOICE" in
+        1)
+            install_docker
+            ;;
+        2)
+            status_docker
+            ;;
+        3)
+            uninstall_docker
+            ;;
+        4)
+            echo "Exit."
+            exit 0
+            ;;
+        *)
+            echo "Invalid option."
+            ;;
+    esac
+
+    echo
+done
